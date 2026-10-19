@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.research/
+.pnpm-store/
+qa-*.png
+qa-final/
+*.log
+.DS_Store

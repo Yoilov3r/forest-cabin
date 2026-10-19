@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="一间松林深处的小屋，支持鼠标环绕、缩放和平移观察。"
+    />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <title>林间小屋</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene" aria-label="可交互的林中小屋三维场景"></canvas>
+
+      <div class="vignette" aria-hidden="true"></div>
+      <div class="grain" aria-hidden="true"></div>
+
+      <div id="loading" class="loading" role="status" aria-live="polite">
+        <div class="loading-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <p class="loading-kicker">森林研究 · 01</p>
+        <h2>正在进入森林</h2>
+        <div class="loading-track" aria-hidden="true">
+          <span id="loading-progress"></span>
+        </div>
+        <p id="loading-detail" class="loading-detail">整理林木与小屋...</p>
+      </div>
+
+      <header class="masthead">
+        <p class="eyebrow">森林研究 · 01</p>
+        <h1>林间小屋</h1>
+        <p class="subtitle">黄昏、松林与一间等待灯火的木屋</p>
+      </header>
+
+      <aside class="control-panel" aria-label="场景控制">
+        <button
+          id="auto-orbit"
+          class="control-button"
+          type="button"
+          aria-pressed="false"
+        >
+          <span class="control-dot"></span>
+          自动环绕
+        </button>
+        <label class="quality-control">
+          <span>画质</span>
+          <select id="quality" aria-label="画质等级">
+            <option value="high">精致</option>
+            <option value="medium" selected>平衡</option>
+            <option value="low">流畅</option>
+          </select>
+        </label>
+        <button id="reset-view" class="control-button" type="button">重置视角</button>
+      </aside>
+
+      <div class="scene-note" aria-hidden="true">
+        <span></span>
+        <p>松脂、薄雾与落日余温</p>
+      </div>
+
+      <footer class="hint-bar">
+        <span class="desktop-hint">左键拖动旋转</span>
+        <i class="desktop-hint"></i>
+        <span class="desktop-hint">滚轮缩放</span>
+        <i class="desktop-hint"></i>
+        <span class="desktop-hint">右键拖动平移</span>
+        <span class="touch-hint">单指拖动旋转</span>
+        <i class="touch-hint"></i>
+        <span class="touch-hint">双指缩放和平移</span>
+      </footer>
+
+      <button id="credits-toggle" class="credits-toggle" type="button">
+        素材署名
+      </button>
+
+      <section id="credits" class="credits" hidden aria-label="素材署名">
+        <button id="credits-close" class="credits-close" type="button" aria-label="关闭">
+          ×
+        </button>
+        <p class="credits-kicker">素材署名</p>
+        <h2>场景素材</h2>
+        <p>
+          原木小屋 “Scandinavian Log Cabin” 与松林地形 “Pine Forest” 来自
+          <a href="https://github.com/HikmetEmre/Mountain_Honey_Pine_Cabin" target="_blank" rel="noreferrer">Mountain Honey Pine Cabin</a>，
+          原模型由 rivetech、fangzhangmnm 创作，按 CC BY 4.0 使用。
+        </p>
+        <p>
+          野餐桌 “Picnic Table - Low Poly” 由 Derek Flanagan 创作，
+          按 CC BY 4.0 使用。
+        </p>
+        <p>
+          森林 HDRI “Sunset Forest” 来自
+          <a href="https://polyhaven.com/a/sunset_forest" target="_blank" rel="noreferrer">Poly Haven</a>，
+          授权为 CC0。
+        </p>
+        <p class="credits-small">
+          场景代码、灯光、粒子与交互由本项目重新实现。完整署名见
+          <code>CREDITS.md</code>。
+        </p>
+      </section>
+
+      <div id="error-panel" class="error-panel" hidden role="alert">
+        <p class="loading-kicker">场景错误</p>
+        <h2>场景没有成功载入</h2>
+        <p id="error-detail">请刷新页面后重试。</p>
+      </div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
