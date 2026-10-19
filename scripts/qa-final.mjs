@@ -19,6 +19,8 @@ const browser = await chromium.launch({
     "--ignore-gpu-blocklist",
     "--use-angle=swiftshader",
     "--enable-unsafe-swiftshader",
+    "--disable-ipv6",
+    "--host-resolver-rules=MAP yoilov3r.github.io 185.199.108.153",
   ],
 });
 
@@ -34,12 +36,23 @@ function collectLogs(page) {
 }
 
 async function waitForScene(page) {
-  await page.goto(url, { waitUntil: "commit", timeout: 60000 });
-  await page.waitForFunction(
-    () => document.querySelector("#loading")?.classList.contains("is-hidden"),
-    null,
-    { timeout: 60000 },
-  );
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: "commit", timeout: 60000 });
+      await page.waitForFunction(
+        () => document.querySelector("#loading")?.classList.contains("is-hidden"),
+        null,
+        { timeout: 120000 },
+      );
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await page.waitForTimeout(2500);
+    }
+  }
+  if (lastError) throw lastError;
   await page.waitForTimeout(900);
 }
 

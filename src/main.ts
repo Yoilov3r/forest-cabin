@@ -921,10 +921,33 @@ async function loadEnvironment() {
 }
 
 async function loadSceneAssets() {
-  setLoading(31, "松林正在生长...");
-  const pine = await loadGLTF(assetUrl("assets/pine.glb"), (progress) => {
-    setLoading(31 + progress * 25, "松林正在生长...");
-  });
+  setLoading(31, "松林与木屋正在载入...");
+  const progress = { pine: 0, cabin: 0, picnic: 0 };
+  const updateProgress = () => {
+    const weighted =
+      progress.pine * 0.24 + progress.cabin * 0.58 + progress.picnic * 0.18;
+    setLoading(31 + weighted * 63, "松林与木屋正在载入...");
+  };
+  const [pine, cabinModel, picnic] = await Promise.all([
+    loadGLTF(assetUrl("assets/pine.glb"), (value) => {
+      progress.pine = value;
+      updateProgress();
+    }),
+    loadGLTF(assetUrl("assets/cabin.glb"), (value) => {
+      progress.cabin = value;
+      updateProgress();
+    }),
+    loadGLTF(assetUrl("assets/picnic-table.glb"), (value) => {
+      progress.picnic = value;
+      updateProgress();
+    }).catch((error) => {
+      console.warn("Picnic table skipped.", error);
+      progress.picnic = 1;
+      updateProgress();
+      return null;
+    }),
+  ]);
+
   terrain = pine;
   normalizeModel(terrain, 500);
   prepareModel(terrain, false);
@@ -966,10 +989,6 @@ async function loadSceneAssets() {
     });
   }
 
-  setLoading(59, "原木小屋正在落到林间...");
-  const cabinModel = await loadGLTF(assetUrl("assets/cabin.glb"), (progress) => {
-    setLoading(59 + progress * 24, "原木小屋正在落到林间...");
-  });
   cabin = cabinModel;
   cabin.position.set(14.839, 2.561, 12.545);
   cabin.rotation.y = 2.55229;
@@ -1002,18 +1021,13 @@ async function loadSceneAssets() {
   sun.target.updateMatrixWorld();
   sun.updateMatrixWorld();
 
-  setLoading(88, "添加野餐桌与林地细节...");
-  try {
-    const picnic = await loadGLTF(assetUrl("assets/picnic-table.glb"), (progress) => {
-      setLoading(88 + progress * 4, "添加野餐桌与林地细节...");
-    });
+  setLoading(94, "添加野餐桌与林地细节...");
+  if (picnic) {
     normalizeModel(picnic, 9.5);
     picnic.position.set(39, sampleTerrainHeight(39, 35, 0) + 0.08, 35);
     picnic.rotation.y = -0.7;
     prepareModel(picnic, true);
     scene.add(picnic);
-  } catch (error) {
-    console.warn("Picnic table skipped.", error);
   }
 
   viewTarget.set(cabinCenter.x, cabinBox.min.y + cabinSize.y * 0.48, cabinCenter.z);
@@ -1032,7 +1046,7 @@ async function loadSceneAssets() {
   addContactShadow();
   addGroundDetails();
   setupAtmosphere();
-  setLoading(96, "调亮窗边的灯火...");
+  setLoading(98, "调亮窗边的灯火...");
 }
 
 function setQuality(nextQuality: QualityMode) {

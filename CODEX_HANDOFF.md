@@ -22,6 +22,7 @@
 - 移动端提示改为单指旋转、双指缩放和平移
 - 移除 `@ts-nocheck`，恢复完整的 TypeScript 类型检查
 - 资源路径改为 `import.meta.env.BASE_URL`，支持 GitHub Pages 子路径
+- 三个 GLB 改为并发加载，缩短慢速网络下的首屏等待
 - 验收脚本改为桌面与移动端串行执行，避免并发软件渲染超时
 - 重置视角会同时关闭自动环绕
 - 替换弃用的 `RGBELoader`，补充 favicon，浏览器控制台无警告和 404
