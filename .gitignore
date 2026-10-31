@@ -2,6 +2,8 @@ node_modules/
 dist/
 .research/
 .pnpm-store/
+.tmp/
+/$null
 qa-*.png
 qa-final/
 *.log

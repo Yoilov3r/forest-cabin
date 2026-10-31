@@ -45,6 +45,15 @@
           <span class="control-dot"></span>
           自动环绕
         </button>
+        <button
+          id="interior-view"
+          class="control-button"
+          type="button"
+          aria-pressed="false"
+        >
+          <span class="control-dot"></span>
+          室内视角
+        </button>
         <label class="quality-control">
           <span>画质</span>
           <select id="quality" aria-label="画质等级">
@@ -62,17 +71,23 @@
       </div>
 
       <footer class="hint-bar">
-        <span class="desktop-hint">左键拖动旋转</span>
+        <span class="desktop-hint">左键拖动旋转 / 单击拉近</span>
         <i class="desktop-hint"></i>
-        <span class="desktop-hint">滚轮缩放</span>
+        <span class="desktop-hint">右键单击拉远</span>
         <i class="desktop-hint"></i>
-        <span class="desktop-hint">右键拖动平移</span>
+        <span class="desktop-hint">滚轮缩放 · 右键拖动平移</span>
         <span class="touch-hint">单指拖动旋转</span>
         <i class="touch-hint"></i>
         <span class="touch-hint">双指缩放和平移</span>
       </footer>
 
-      <button id="credits-toggle" class="credits-toggle" type="button">
+      <button
+        id="credits-toggle"
+        class="credits-toggle"
+        type="button"
+        aria-controls="credits"
+        aria-expanded="false"
+      >
         素材署名
       </button>
 
@@ -104,11 +119,11 @@
 
       <div id="error-panel" class="error-panel" hidden role="alert">
         <p class="loading-kicker">场景错误</p>
-        <h2>场景没有成功载入</h2>
+        <h2 id="error-title">场景没有成功载入</h2>
         <p id="error-detail">请刷新页面后重试。</p>
       </div>
     </main>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

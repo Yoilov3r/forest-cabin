@@ -6,7 +6,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
-import "./style.css";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 type QualityMode = "high" | "medium" | "low";
 
@@ -26,6 +26,15 @@ type DustCloud = {
   phases: Float32Array;
 };
 
+type CameraMove = {
+  fromPosition: THREE.Vector3;
+  toPosition: THREE.Vector3;
+  fromTarget: THREE.Vector3;
+  toTarget: THREE.Vector3;
+  startedAt: number;
+  duration: number;
+};
+
 function getElement<T extends Element>(selector: string) {
   const element = document.querySelector<T>(selector);
   if (!element) throw new Error(`Scene UI element is missing: ${selector}`);
@@ -39,11 +48,14 @@ const loadingDetail = getElement<HTMLElement>("#loading-detail");
 const errorPanel = getElement<HTMLElement>("#error-panel");
 const errorDetail = getElement<HTMLElement>("#error-detail");
 const autoOrbitButton = getElement<HTMLButtonElement>("#auto-orbit");
+const interiorViewButton = getElement<HTMLButtonElement>("#interior-view");
 const qualitySelect = getElement<HTMLSelectElement>("#quality");
 const resetViewButton = getElement<HTMLButtonElement>("#reset-view");
 const creditsToggle = getElement<HTMLButtonElement>("#credits-toggle");
 const creditsPanel = getElement<HTMLElement>("#credits");
 const creditsClose = getElement<HTMLButtonElement>("#credits-close");
+const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+let reducedMotion = reducedMotionQuery.matches;
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x9b9d84, 0.0020);
@@ -76,10 +88,12 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.14;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
+renderer.shadowMap.needsUpdate = true;
 renderer.setClearColor(0x101812, 1);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+controls.enableDamping = !reducedMotion;
 controls.dampingFactor = 0.055;
 controls.rotateSpeed = 0.58;
 controls.zoomSpeed = 0.78;
@@ -92,7 +106,25 @@ controls.maxPolarAngle = Math.PI * 0.49;
 controls.autoRotate = false;
 controls.autoRotateSpeed = 0.2;
 controls.target.set(12, 10, 10);
-(window as any).__forestCabin = { camera, controls, scene };
+(window as any).__forestCabin = {
+  camera,
+  controls,
+  renderer,
+  scene,
+  THREE,
+  getState: () => ({
+    interiorViewEnabled,
+    autoOrbitEnabled,
+    dollyTargetDistance,
+    cameraMoveActive: Boolean(cameraMove),
+    cameraMoveElapsed: cameraMove
+      ? Number((clock.elapsedTime - cameraMove.startedAt).toFixed(3))
+      : null,
+    quality,
+    reducedMotion,
+    shadowAutoUpdate: renderer.shadowMap.autoUpdate,
+  }),
+};
 
 const composer = new EffectComposer(renderer);
 composer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -107,8 +139,8 @@ const outputPass = new OutputPass();
 composer.addPass(renderPass);
 composer.addPass(bloomPass);
 composer.addPass(outputPass);
-composer.renderTarget1.samples = 4;
-composer.renderTarget2.samples = 4;
+composer.renderTarget1.samples = 2;
+composer.renderTarget2.samples = 2;
 
 const clock = new THREE.Clock();
 const windTime = { value: 0 };
@@ -127,13 +159,21 @@ let viewTarget = new THREE.Vector3(12, 9, 12);
 let initialCameraPosition = new THREE.Vector3(66, 32, 88);
 let initialTarget = new THREE.Vector3(12, 9, 12);
 let autoOrbitEnabled = false;
+let interiorViewEnabled = false;
+let cameraMove: CameraMove | null = null;
+let dollyTargetDistance: number | null = null;
 let lanternLight: THREE.PointLight | null = null;
 let lanternGlow: THREE.Sprite | null = null;
+let interiorFireLight: THREE.PointLight | null = null;
+let tvScreenMaterial: THREE.MeshStandardMaterial | null = null;
+let interiorScene: THREE.Group | null = null;
+const cabinExteriorObjects: THREE.Object3D[] = [];
 const windowGlows: THREE.Sprite[] = [];
 const dustClouds: DustCloud[] = [];
 const smokeParticles: SmokeParticle[] = [];
 const lightShafts: THREE.Mesh[] = [];
 const groundMeshes: THREE.Mesh[] = [];
+const fireFlames: THREE.Mesh[] = [];
 
 const sun = new THREE.DirectionalLight(0xffb56f, 4.8);
 sun.position.set(-110, 130, -90);
@@ -182,9 +222,21 @@ function setLoading(progress: number, detail: string) {
 function showError(error: unknown) {
   console.error(error);
   loading.classList.add("is-hidden");
+  loading.hidden = true;
   errorPanel.hidden = false;
   errorDetail.textContent =
     error instanceof Error ? error.message : "未知错误，请刷新页面后重试。";
+}
+
+function finishLoading() {
+  loading.classList.add("is-hidden");
+  loading.setAttribute("aria-hidden", "true");
+  window.setTimeout(
+    () => {
+      loading.hidden = true;
+    },
+    reducedMotion ? 0 : 850,
+  );
 }
 
 function makeCanvasTexture(
@@ -252,16 +304,21 @@ function makeSmokeTexture() {
 
 function makeShadowTexture() {
   return makeCanvasTexture(256, (context, size) => {
+    context.clearRect(0, 0, size, size);
+    context.save();
+    context.translate(size * 0.5, size * 0.5);
+    context.scale(1, 0.72);
     const gradient = context.createRadialGradient(
-      size * 0.5, size * 0.5, size * 0.04,
-      size * 0.5, size * 0.5, size * 0.5,
+      0, 0, size * 0.04,
+      0, 0, size * 0.5,
     );
-    gradient.addColorStop(0, "rgba(0, 0, 0, 0.9)");
-    gradient.addColorStop(0.48, "rgba(0, 0, 0, 0.45)");
-    gradient.addColorStop(0.78, "rgba(0, 0, 0, 0.1)");
+    gradient.addColorStop(0, "rgba(0, 0, 0, 0.78)");
+    gradient.addColorStop(0.38, "rgba(0, 0, 0, 0.36)");
+    gradient.addColorStop(0.72, "rgba(0, 0, 0, 0.07)");
     gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
     context.fillStyle = gradient;
-    context.fillRect(0, 0, size, size);
+    context.fillRect(-size * 0.5, -size, size, size * 2);
+    context.restore();
   });
 }
 
@@ -352,6 +409,146 @@ function makeDirtTexture() {
       context.stroke();
     }
   }, 2, 11);
+}
+
+function makeFoundationStoneTexture() {
+  return makeCanvasTexture(512, (context, size) => {
+    context.fillStyle = "#837b6c";
+    context.fillRect(0, 0, size, size);
+    const rows = 7;
+    const rowHeight = size / rows;
+    for (let row = 0; row < rows; row += 1) {
+      const y = row * rowHeight;
+      let x = row % 2 === 0 ? -size * 0.08 : -size * 0.2;
+      while (x < size) {
+        const width = size * (0.12 + random() * 0.13);
+        const inset = 3 + random() * 3;
+        const lightness = 112 + Math.floor(random() * 38);
+        context.fillStyle = `rgb(${lightness + 7}, ${lightness + 3}, ${lightness - 5})`;
+        context.fillRect(x + inset, y + inset, width - inset * 1.4, rowHeight - inset * 1.6);
+        context.fillStyle = `rgba(46, 42, 35, ${0.12 + random() * 0.1})`;
+        context.fillRect(
+          x + inset,
+          y + rowHeight - inset * 1.7,
+          width - inset * 1.4,
+          inset,
+        );
+        x += width;
+      }
+    }
+    for (let index = 0; index < 180; index += 1) {
+      const radius = 0.8 + random() * 3.2;
+      context.beginPath();
+      context.arc(random() * size, random() * size, radius, 0, Math.PI * 2);
+      context.fillStyle = random() > 0.5
+        ? "rgba(228, 218, 194, 0.06)"
+        : "rgba(25, 23, 19, 0.08)";
+      context.fill();
+    }
+  }, 2, 2);
+}
+
+function makeCrossedGeometry(width: number, height: number, planes = 2) {
+  const parts: THREE.BufferGeometry[] = [];
+  for (let index = 0; index < planes; index += 1) {
+    const plane = new THREE.PlaneGeometry(width, height);
+    plane.translate(0, height * 0.5, 0);
+    plane.rotateY((index / planes) * Math.PI);
+    parts.push(plane);
+  }
+  const geometry = mergeGeometries(parts, false);
+  for (const part of parts) part.dispose();
+  if (!geometry) throw new Error("Unable to create crossed foliage geometry.");
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function makeRugTexture() {
+  return makeCanvasTexture(512, (context, size) => {
+    context.fillStyle = "#314239";
+    context.fillRect(0, 0, size, size);
+    context.strokeStyle = "#b58c56";
+    context.lineWidth = 18;
+    context.strokeRect(24, 24, size - 48, size - 48);
+    context.strokeStyle = "rgba(225, 191, 132, 0.52)";
+    context.lineWidth = 5;
+    context.strokeRect(52, 52, size - 104, size - 104);
+    for (let index = 0; index < 9; index += 1) {
+      const offset = 92 + index * 42;
+      context.beginPath();
+      context.moveTo(offset, 78);
+      context.lineTo(offset + 28, size * 0.5);
+      context.lineTo(offset, size - 78);
+      context.strokeStyle = index % 2 === 0
+        ? "rgba(185, 142, 88, 0.34)"
+        : "rgba(204, 179, 135, 0.16)";
+      context.lineWidth = 8;
+      context.stroke();
+    }
+  });
+}
+
+function makeTvTexture() {
+  return makeCanvasTexture(512, (context, size) => {
+    const height = size * 0.58;
+    const sky = context.createLinearGradient(0, 0, 0, height);
+    sky.addColorStop(0, "#293f51");
+    sky.addColorStop(0.6, "#997356");
+    sky.addColorStop(1, "#d8a35c");
+    context.fillStyle = sky;
+    context.fillRect(0, 0, size, height);
+    context.fillStyle = "#1d2d27";
+    context.beginPath();
+    context.moveTo(0, height);
+    context.lineTo(size * 0.2, height * 0.48);
+    context.lineTo(size * 0.38, height * 0.72);
+    context.lineTo(size * 0.56, height * 0.34);
+    context.lineTo(size * 0.76, height * 0.66);
+    context.lineTo(size, height * 0.46);
+    context.lineTo(size, height);
+    context.closePath();
+    context.fill();
+    const glow = context.createRadialGradient(
+      size * 0.7, height * 0.76, 0,
+      size * 0.7, height * 0.76, size * 0.14,
+    );
+    glow.addColorStop(0, "rgba(255, 210, 132, 0.7)");
+    glow.addColorStop(1, "rgba(255, 190, 90, 0)");
+    context.fillStyle = glow;
+    context.fillRect(0, 0, size, height);
+    context.fillStyle = "#121a16";
+    context.fillRect(0, height, size, size - height);
+  });
+}
+
+function makeInteriorWoodTexture() {
+  return makeCanvasTexture(512, (context, size) => {
+    context.fillStyle = "#5c3d28";
+    context.fillRect(0, 0, size, size);
+    for (let row = 0; row < 8; row += 1) {
+      const y = row * (size / 8);
+      context.fillStyle = row % 2 === 0
+        ? "rgba(34, 20, 13, 0.18)"
+        : "rgba(224, 173, 115, 0.08)";
+      context.fillRect(0, y, size, size / 8);
+      context.strokeStyle = "rgba(24, 15, 10, 0.35)";
+      context.lineWidth = 3;
+      context.beginPath();
+      context.moveTo(0, y);
+      context.lineTo(size, y);
+      context.stroke();
+    }
+    for (let index = 0; index < 120; index += 1) {
+      context.strokeStyle = `rgba(231, 184, 126, ${0.015 + random() * 0.04})`;
+      context.lineWidth = 0.8 + random() * 1.6;
+      const x = random() * size;
+      const y = random() * size;
+      context.beginPath();
+      context.moveTo(x, y);
+      context.bezierCurveTo(x + 40, y - 6, x + 80, y + 6, x + 130, y);
+      context.stroke();
+    }
+  }, 2, 2);
 }
 
 function createSky() {
@@ -456,7 +653,7 @@ function applyNearCameraFade(material: THREE.Material) {
       "#include <alphatest_fragment>",
       `float cameraDistance = length(vViewPosition);
        float fadeNoise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
-       float nearFade = smoothstep(10.0, 24.0, cameraDistance);
+       float nearFade = smoothstep(16.0, 36.0, cameraDistance);
        if (nearFade < fadeNoise) discard;
        #include <alphatest_fragment>`,
     );
@@ -479,6 +676,88 @@ function prepareModel(root: THREE.Object3D, castShadow = true) {
   });
 }
 
+function clearTreesAroundCabin(center: THREE.Vector3, radius: number) {
+  if (!terrain) return [];
+  const clearanceRadiusSquared = radius * radius;
+  const clearedMeshes: Array<{
+    name: string;
+    radius: number;
+    removedTriangles: number;
+    remainingTriangles: number;
+  }> = [];
+  const worldPosition = new THREE.Vector3();
+
+  terrain.updateMatrixWorld(true);
+  terrain.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(object.material)
+      ? object.material
+      : [object.material];
+    if (
+      materials.length !== 1 ||
+      materials[0]?.name !== "pine" ||
+      !object.geometry.getIndex()
+    ) {
+      return;
+    }
+
+    const geometry = object.geometry;
+    const positions = geometry.getAttribute("position");
+    const index = geometry.getIndex()!;
+    const transformed = new Float32Array(positions.count * 3);
+    for (let vertex = 0; vertex < positions.count; vertex += 1) {
+      worldPosition
+        .fromBufferAttribute(positions, vertex)
+        .applyMatrix4(object.matrixWorld);
+      transformed[vertex * 3] = worldPosition.x;
+      transformed[vertex * 3 + 1] = worldPosition.y;
+      transformed[vertex * 3 + 2] = worldPosition.z;
+    }
+
+    const retained: number[] = [];
+    const sourceTriangles = index.count / 3;
+    for (let offset = 0; offset < index.count; offset += 3) {
+      const first = index.getX(offset);
+      const second = index.getX(offset + 1);
+      const third = index.getX(offset + 2);
+      const centerX =
+        (transformed[first * 3] +
+          transformed[second * 3] +
+          transformed[third * 3]) /
+        3;
+      const centerZ =
+        (transformed[first * 3 + 2] +
+          transformed[second * 3 + 2] +
+          transformed[third * 3 + 2]) /
+        3;
+      const deltaX = centerX - center.x;
+      const deltaZ = centerZ - center.z;
+      if (deltaX * deltaX + deltaZ * deltaZ <= clearanceRadiusSquared) continue;
+      retained.push(first, second, third);
+    }
+
+    if (retained.length === index.count) return;
+    const nextIndex =
+      positions.count < 65536
+        ? new Uint16Array(retained)
+        : new Uint32Array(retained);
+    geometry.setIndex(new THREE.BufferAttribute(nextIndex, 1));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const stats = {
+      name: object.name,
+      radius,
+      removedTriangles: sourceTriangles - retained.length / 3,
+      remainingTriangles: retained.length / 3,
+    };
+    object.userData.treeClearance = stats;
+    clearedMeshes.push(stats);
+  });
+
+  if (clearedMeshes.length > 0) renderer.shadowMap.needsUpdate = true;
+  return clearedMeshes;
+}
+
 function sampleTerrainHeight(x: number, z: number, fallback = 0) {
   if (groundMeshes.length === 0) return fallback;
   shadowRaycaster.set(new THREE.Vector3(x, 260, z), shadowDown);
@@ -486,7 +765,20 @@ function sampleTerrainHeight(x: number, z: number, fallback = 0) {
   return hits.length > 0 ? hits[0].point.y : fallback;
 }
 
+function sampleTerrainNormal(x: number, z: number, span = 1.25) {
+  const left = sampleTerrainHeight(x - span, z);
+  const right = sampleTerrainHeight(x + span, z);
+  const near = sampleTerrainHeight(x, z - span);
+  const far = sampleTerrainHeight(x, z + span);
+  return new THREE.Vector3(
+    -(right - left) / (span * 2),
+    1,
+    -(far - near) / (span * 2),
+  ).normalize();
+}
+
 function addContactShadow() {
+  if (!cabin) return;
   const texture = makeShadowTexture();
   const material = new THREE.MeshBasicMaterial({
     map: texture,
@@ -498,15 +790,136 @@ function addContactShadow() {
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
   });
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(32, 28), material);
-  mesh.rotation.x = -Math.PI * 0.5;
-  mesh.position.set(
-    cabinCenter.x,
-    sampleTerrainHeight(cabinCenter.x, cabinCenter.z) + 0.06,
-    cabinCenter.z,
+  const patchLayout = [
+    { local: [0, 0, 5.75], size: [8.4, 2.9] },
+    { local: [0, 0, -5.35], size: [8.4, 2.9] },
+    { local: [-5.55, 0, 0.4], size: [2.9, 8.2] },
+    { local: [5.55, 0, 0.4], size: [2.9, 8.2] },
+    { local: [-4.8, 0, 5.15], size: [3.7, 3.7] },
+    { local: [4.8, 0, 5.15], size: [3.7, 3.7] },
+    { local: [-4.8, 0, -4.65], size: [3.7, 3.7] },
+    { local: [4.8, 0, -4.65], size: [3.7, 3.7] },
+  ];
+  const group = new THREE.Group();
+  group.name = "cabin-contact-shadow";
+  const planeNormal = new THREE.Vector3(0, 0, 1);
+
+  patchLayout.forEach(({ local, size }, index) => {
+    const position = cabin!.localToWorld(
+      new THREE.Vector3(local[0], local[1], local[2]),
+    );
+    const y = sampleTerrainHeight(position.x, position.z, cabinBox.min.y);
+    const normal = sampleTerrainNormal(position.x, position.z);
+    const patch = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    patch.name = `cabin-contact-shadow-${index}`;
+    patch.position.set(position.x, y + 0.055, position.z);
+    patch.quaternion.setFromUnitVectors(planeNormal, normal);
+    patch.scale.set(size[0], size[1], 1);
+    patch.renderOrder = 2;
+    patch.frustumCulled = false;
+    group.add(patch);
+  });
+  scene.add(group);
+}
+
+function addFoundationEdging() {
+  if (!cabin) return;
+  const cabinRoot = cabin;
+  const base = cabin.getObjectByName("Object_7");
+  if (!base) return;
+  cabinRoot.updateMatrixWorld(true);
+  const inverseCabinMatrix = cabinRoot.matrixWorld.clone().invert();
+  const localBox = new THREE.Box3()
+    .setFromObject(base)
+    .applyMatrix4(inverseCabinMatrix);
+  const minX = localBox.min.x;
+  const maxX = localBox.max.x;
+  const maxZ = localBox.max.z;
+  const minZ = localBox.min.z;
+  const foundation = new THREE.Group();
+  foundation.name = "cabin-foundation";
+  const stoneTransforms: Array<{
+    matrix: THREE.Matrix4;
+    color: THREE.Color;
+  }> = [];
+  const stonePalette = [0x5e5b50, 0x6b6558, 0x51564c, 0x77705f, 0x62635a];
+  const worldScale = cabinRoot.getWorldScale(new THREE.Vector3()).x;
+  const edgeStones: Array<[number, number]> = [];
+  for (let index = 0; index < 7; index += 1) {
+    const x = THREE.MathUtils.lerp(minX + 0.45, maxX - 0.45, index / 6);
+    edgeStones.push([x, maxZ + 0.24 + (index % 2) * 0.12]);
+    edgeStones.push([x, minZ - 0.2 - (index % 2) * 0.1]);
+  }
+  for (let index = 0; index < 5; index += 1) {
+    const z = THREE.MathUtils.lerp(minZ + 0.6, maxZ - 0.6, index / 4);
+    edgeStones.push([minX - 0.22, z]);
+    edgeStones.push([maxX + 0.22, z]);
+  }
+  edgeStones.forEach(([localX, localZ], index) => {
+    const world = cabinRoot.localToWorld(new THREE.Vector3(localX, 0, localZ));
+    const ground = sampleTerrainHeight(world.x, world.z, cabinBox.min.y);
+    const size = 0.88 + random() * 0.82;
+    dummy.position.set(
+      world.x + (random() - 0.5) * 0.24,
+      ground + size * 0.1,
+      world.z + (random() - 0.5) * 0.2,
+    );
+    dummy.rotation.set(
+      (random() - 0.5) * 0.18,
+      random() * Math.PI * 2,
+      (random() - 0.5) * 0.18,
+    );
+    dummy.scale.set(size * 1.35, size * 0.58, size);
+    dummy.updateMatrix();
+    stoneTransforms.push({
+      matrix: dummy.matrix.clone(),
+      color: new THREE.Color(stonePalette[index % stonePalette.length]),
+    });
+  });
+
+  const geometry = new THREE.DodecahedronGeometry(0.55, 0);
+  const positions = geometry.getAttribute("position");
+  for (let index = 0; index < positions.count; index += 1) {
+    const roughness = 0.9 + random() * 0.18;
+    positions.setXYZ(
+      index,
+      positions.getX(index) * roughness,
+      positions.getY(index) * roughness,
+      positions.getZ(index) * roughness,
+    );
+  }
+  positions.needsUpdate = true;
+  geometry.computeVertexNormals();
+  const material = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.98,
+    metalness: 0,
+    flatShading: true,
+  });
+  const stones = new THREE.InstancedMesh(
+    geometry,
+    material,
+    stoneTransforms.length,
   );
-  mesh.renderOrder = 2;
-  scene.add(mesh);
+  stones.name = "cabin-foundation-edging";
+  stones.userData = {
+    strategy: "textured-base-with-buried-stone-edging",
+    edgeStoneCount: stoneTransforms.length,
+    worldScale,
+  };
+  stones.castShadow = true;
+  stones.receiveShadow = true;
+  stoneTransforms.forEach(({ matrix, color }, index) => {
+    stones.setMatrixAt(index, matrix);
+    stones.setColorAt(index, color);
+  });
+  stones.instanceMatrix.needsUpdate = true;
+  if (stones.instanceColor) stones.instanceColor.needsUpdate = true;
+
+  foundation.add(stones);
+  scene.add(foundation);
+  cabinExteriorObjects.push(foundation);
+  base.visible = true;
 }
 
 function makeWindMaterial(
@@ -522,7 +935,7 @@ function makeWindMaterial(
     metalness: 0,
     side: THREE.DoubleSide,
     alphaTest: 0.28,
-    transparent: true,
+    transparent: false,
     depthWrite: true,
   });
   material.onBeforeCompile = (shader) => {
@@ -552,10 +965,9 @@ function addGroundDetails() {
   if (!terrain) return;
 
   const grassMap = makeGrassTexture();
-  const grassGeometry = new THREE.PlaneGeometry(1.05, 1.28);
-  grassGeometry.translate(0, 0.64, 0);
+  const grassGeometry = makeCrossedGeometry(1.05, 1.28, 2);
   const grassMaterial = makeWindMaterial(grassMap, 0.045, 1.55, 0xa8b87a);
-  const grassCount = 520;
+  const grassCount = 440;
   const grass = new THREE.InstancedMesh(grassGeometry, grassMaterial, grassCount);
   grass.name = "instanced-grass";
   grass.castShadow = false;
@@ -579,10 +991,9 @@ function addGroundDetails() {
   scene.add(grass);
 
   const fernMap = makeFernTexture();
-  const fernGeometry = new THREE.PlaneGeometry(1.9, 1.45);
-  fernGeometry.translate(0, 0.72, 0);
+  const fernGeometry = makeCrossedGeometry(1.9, 1.45, 3);
   const fernMaterial = makeWindMaterial(fernMap, 0.058, 1.15, 0x91ad6e);
-  const fernCount = 138;
+  const fernCount = 120;
   const ferns = new THREE.InstancedMesh(fernGeometry, fernMaterial, fernCount);
   ferns.name = "instanced-ferns";
   ferns.castShadow = false;
@@ -612,24 +1023,217 @@ function addGroundDetails() {
     new THREE.MeshStandardMaterial({ color: 0x303a2f, roughness: 0.99, metalness: 0 }),
   ];
 
-  for (let i = 0; i < 16; i += 1) {
+  const rockCount = 22;
+  const rocks = new THREE.InstancedMesh(rockGeometry, rockMaterials[0], rockCount);
+  rocks.name = "instanced-rocks";
+  rocks.castShadow = true;
+  rocks.receiveShadow = true;
+  const rockColor = new THREE.Color();
+  for (let i = 0; i < rockCount; i += 1) {
     const angle = random() * Math.PI * 2;
     const radius = 18 + random() * 44;
     const x = cabinCenter.x + Math.cos(angle) * radius;
     const z = cabinCenter.z + Math.sin(angle) * radius;
     const y = sampleTerrainHeight(x, z, 0);
-    const rock = new THREE.Mesh(rockGeometry, rockMaterials[i % rockMaterials.length]);
     const scale = 0.22 + random() * 0.62;
-    rock.position.set(x, y + scale * 0.38, z);
-    rock.rotation.set(random() * 0.3, random() * Math.PI * 2, random() * 0.3);
-    rock.scale.set(scale * (1.0 + random() * 0.7), scale * 0.72, scale * (0.9 + random() * 0.6));
-    rock.castShadow = true;
-    rock.receiveShadow = true;
-    scene.add(rock);
+    dummy.position.set(x, y + scale * 0.38, z);
+    dummy.rotation.set(random() * 0.3, random() * Math.PI * 2, random() * 0.3);
+    dummy.scale.set(
+      scale * (1.0 + random() * 0.7),
+      scale * 0.72,
+      scale * (0.9 + random() * 0.6),
+    );
+    dummy.updateMatrix();
+    rocks.setMatrixAt(i, dummy.matrix);
+    rockColor.setHSL(0.18 + random() * 0.05, 0.08, 0.2 + random() * 0.08);
+    rocks.setColorAt(i, rockColor);
   }
+  rocks.instanceMatrix.needsUpdate = true;
+  if (rocks.instanceColor) rocks.instanceColor.needsUpdate = true;
+  scene.add(rocks);
 
+  addShrubs();
+  addFallenLogs();
+  addStumps();
+  addConiferLayer();
   addPath();
   addWoodpile();
+}
+
+function addShrubs() {
+  const lobes = [
+    [-0.42, 0.48, 0.08, 0.56],
+    [0.34, 0.45, -0.12, 0.62],
+    [0.02, 0.78, 0.18, 0.58],
+    [0.08, 0.42, -0.45, 0.48],
+    [-0.12, 0.62, 0.48, 0.5],
+    [0.48, 0.62, 0.34, 0.42],
+  ];
+  const parts = lobes.map(([x, y, z, scale]) => {
+    const geometry = new THREE.IcosahedronGeometry(0.62, 1);
+    geometry.scale(scale, scale * 0.86, scale);
+    geometry.translate(x, y, z);
+    return geometry;
+  });
+  const shrubGeometry = mergeGeometries(parts, false);
+  for (const part of parts) part.dispose();
+  if (!shrubGeometry) return;
+
+  const shrubMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4e6539,
+    roughness: 0.96,
+    metalness: 0,
+    flatShading: true,
+  });
+  const shrubCount = 68;
+  const shrubs = new THREE.InstancedMesh(shrubGeometry, shrubMaterial, shrubCount);
+  shrubs.name = "instanced-shrubs";
+  shrubs.castShadow = false;
+  shrubs.receiveShadow = true;
+  const color = new THREE.Color();
+
+  for (let index = 0; index < shrubCount; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = 18 + Math.pow(random(), 0.8) * 52;
+    const x = cabinCenter.x + Math.cos(angle) * radius;
+    const z = cabinCenter.z + Math.sin(angle) * radius;
+    const y = sampleTerrainHeight(x, z, 0);
+    const scale = 0.35 + random() * 0.62;
+    dummy.position.set(x, y + 0.04, z);
+    dummy.rotation.set(0, random() * Math.PI * 2, 0);
+    dummy.scale.set(scale, scale * (0.8 + random() * 0.5), scale);
+    dummy.updateMatrix();
+    shrubs.setMatrixAt(index, dummy.matrix);
+    color.setHSL(0.23 + random() * 0.05, 0.22 + random() * 0.15, 0.2 + random() * 0.1);
+    shrubs.setColorAt(index, color);
+  }
+  shrubs.instanceMatrix.needsUpdate = true;
+  if (shrubs.instanceColor) shrubs.instanceColor.needsUpdate = true;
+  scene.add(shrubs);
+}
+
+function addStumps() {
+  const geometry = new THREE.CylinderGeometry(0.36, 0.46, 0.82, 9);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x5a402b,
+    roughness: 0.97,
+    metalness: 0,
+  });
+  const count = 12;
+  const stumps = new THREE.InstancedMesh(geometry, material, count);
+  stumps.name = "tree-stumps";
+  stumps.castShadow = false;
+  stumps.receiveShadow = true;
+  for (let index = 0; index < count; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = 19 + random() * 46;
+    const x = cabinCenter.x + Math.cos(angle) * radius;
+    const z = cabinCenter.z + Math.sin(angle) * radius;
+    const y = sampleTerrainHeight(x, z, 0);
+    const scale = 0.65 + random() * 0.8;
+    dummy.position.set(x, y + 0.4 * scale, z);
+    dummy.rotation.set(0, random() * Math.PI * 2, 0);
+    dummy.scale.set(scale, scale, scale);
+    dummy.updateMatrix();
+    stumps.setMatrixAt(index, dummy.matrix);
+  }
+  stumps.instanceMatrix.needsUpdate = true;
+  scene.add(stumps);
+}
+
+function addConiferLayer() {
+  const foliageParts = [
+    [1.9, 4.6, 2.2],
+    [1.5, 3.8, 4.2],
+    [1.05, 3.1, 6.0],
+  ].map(([radius, height, y]) => {
+    const cone = new THREE.ConeGeometry(radius, height, 8);
+    cone.translate(0, y, 0);
+    return cone;
+  });
+  const foliageGeometry = mergeGeometries(foliageParts, false);
+  for (const part of foliageParts) part.dispose();
+  if (!foliageGeometry) return;
+
+  const foliageMaterial = new THREE.MeshStandardMaterial({
+    color: 0x2f4830,
+    roughness: 0.95,
+    metalness: 0,
+    flatShading: true,
+  });
+  const trunkGeometry = new THREE.CylinderGeometry(0.22, 0.34, 5.2, 7);
+  trunkGeometry.translate(0, 2.6, 0);
+  const trunkMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4a3526,
+    roughness: 0.98,
+    metalness: 0,
+  });
+  const count = 38;
+  const foliage = new THREE.InstancedMesh(
+    foliageGeometry,
+    foliageMaterial,
+    count,
+  );
+  const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, count);
+  foliage.name = "conifer-layer-foliage";
+  trunks.name = "conifer-layer-trunks";
+  foliage.castShadow = false;
+  trunks.castShadow = false;
+  foliage.receiveShadow = true;
+  trunks.receiveShadow = true;
+  const color = new THREE.Color();
+
+  for (let index = 0; index < count; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = 38 + Math.pow(random(), 0.78) * 52;
+    const x = cabinCenter.x + Math.cos(angle) * radius;
+    const z = cabinCenter.z + Math.sin(angle) * radius;
+    const y = sampleTerrainHeight(x, z, 0);
+    const scale = 0.75 + random() * 1.0;
+    dummy.position.set(x, y, z);
+    dummy.rotation.set(0, random() * Math.PI * 2, 0);
+    dummy.scale.set(scale, scale * (0.9 + random() * 0.35), scale);
+    dummy.updateMatrix();
+    foliage.setMatrixAt(index, dummy.matrix);
+    trunks.setMatrixAt(index, dummy.matrix);
+    color.setHSL(0.26 + random() * 0.035, 0.2 + random() * 0.12, 0.18 + random() * 0.09);
+    foliage.setColorAt(index, color);
+  }
+  foliage.instanceMatrix.needsUpdate = true;
+  trunks.instanceMatrix.needsUpdate = true;
+  if (foliage.instanceColor) foliage.instanceColor.needsUpdate = true;
+  scene.add(foliage, trunks);
+}
+
+function addFallenLogs() {
+  const logGeometry = new THREE.CylinderGeometry(0.22, 0.3, 3.8, 10);
+  logGeometry.rotateZ(Math.PI * 0.5);
+  const logMaterial = new THREE.MeshStandardMaterial({
+    color: 0x543923,
+    roughness: 0.98,
+    metalness: 0,
+  });
+  const count = 7;
+  const logs = new THREE.InstancedMesh(logGeometry, logMaterial, count);
+  logs.name = "fallen-logs";
+  logs.castShadow = false;
+  logs.receiveShadow = true;
+
+  for (let index = 0; index < count; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = 23 + random() * 38;
+    const x = cabinCenter.x + Math.cos(angle) * radius;
+    const z = cabinCenter.z + Math.sin(angle) * radius;
+    const y = sampleTerrainHeight(x, z, 0);
+    const scale = 0.7 + random() * 0.8;
+    dummy.position.set(x, y + 0.24 * scale, z);
+    dummy.rotation.set(0, random() * Math.PI * 2, (random() - 0.5) * 0.12);
+    dummy.scale.set(scale, scale, scale);
+    dummy.updateMatrix();
+    logs.setMatrixAt(index, dummy.matrix);
+  }
+  logs.instanceMatrix.needsUpdate = true;
+  scene.add(logs);
 }
 
 function addPath() {
@@ -713,6 +1317,226 @@ function addWoodpile() {
     group.add(log);
   });
   scene.add(group);
+}
+
+function addBox(
+  parent: THREE.Object3D,
+  size: [number, number, number],
+  position: [number, number, number],
+  material: THREE.Material,
+) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+  mesh.position.set(...position);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+  return mesh;
+}
+
+function addInterior() {
+  if (!cabin) return;
+
+  const interior = new THREE.Group();
+  interior.name = "cabin-interior";
+  cabin.add(interior);
+  interiorScene = interior;
+  interior.visible = false;
+  cabinExteriorObjects.length = 0;
+  cabinExteriorObjects.push(...cabin.children.filter((child) => child !== interior));
+
+  const woodMap = makeInteriorWoodTexture();
+  const floorMaterial = new THREE.MeshStandardMaterial({
+    map: woodMap,
+    color: 0x8a6245,
+    roughness: 0.82,
+    metalness: 0,
+  });
+  const wallMaterial = new THREE.MeshStandardMaterial({
+    map: woodMap,
+    color: 0x72513b,
+    roughness: 0.88,
+    metalness: 0,
+  });
+  const darkWoodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x3e281b,
+    roughness: 0.82,
+    metalness: 0,
+  });
+  const fabricMaterial = new THREE.MeshStandardMaterial({
+    color: 0x6b705c,
+    roughness: 0.97,
+    metalness: 0,
+  });
+  const cushionMaterial = new THREE.MeshStandardMaterial({
+    color: 0x8b806a,
+    roughness: 0.98,
+    metalness: 0,
+  });
+  const stoneMaterial = new THREE.MeshStandardMaterial({
+    color: 0x57554c,
+    roughness: 0.96,
+    metalness: 0,
+  });
+  const metalMaterial = new THREE.MeshStandardMaterial({
+    color: 0x242825,
+    roughness: 0.42,
+    metalness: 0.68,
+  });
+
+  addBox(interior, [11.8, 0.12, 12.1], [0, 0.18, 1.05], floorMaterial);
+  addBox(interior, [11.8, 4.2, 0.12], [0, 2.2, -5.25], wallMaterial);
+  addBox(interior, [0.12, 4.2, 12.1], [-5.9, 2.2, 1.05], wallMaterial);
+  addBox(interior, [0.12, 4.2, 12.1], [5.9, 2.2, 1.05], wallMaterial);
+  addBox(interior, [11.8, 0.12, 12.1], [0, 4.24, 1.05], wallMaterial);
+  for (const z of [-3.7, 0, 3.7]) {
+    addBox(interior, [11.5, 0.18, 0.22], [0, 4.02, z], darkWoodMaterial);
+  }
+
+  const windowGlowMaterial = new THREE.MeshBasicMaterial({
+    color: 0x8aa0a0,
+    transparent: true,
+    opacity: 0.52,
+  });
+  const interiorWindow = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.5, 1.5),
+    windowGlowMaterial,
+  );
+  interiorWindow.position.set(-2.7, 2.35, -5.18);
+  interior.add(interiorWindow);
+  addBox(interior, [0.08, 1.55, 0.12], [-2.7, 2.35, -5.1], darkWoodMaterial);
+  addBox(interior, [2.55, 0.08, 0.12], [-2.7, 2.35, -5.1], darkWoodMaterial);
+
+  const rug = new THREE.Mesh(
+    new THREE.PlaneGeometry(5.8, 4.2),
+    new THREE.MeshStandardMaterial({
+      map: makeRugTexture(),
+      roughness: 0.98,
+      metalness: 0,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    }),
+  );
+  rug.rotation.x = -Math.PI * 0.5;
+  rug.position.set(-0.15, 0.245, 0.15);
+  rug.receiveShadow = true;
+  interior.add(rug);
+
+  const sofa = new THREE.Group();
+  sofa.name = "sofa";
+  sofa.position.set(-1.0, 0.24, -3.8);
+  addBox(sofa, [3.5, 0.48, 1.2], [0, 0.36, 0], darkWoodMaterial);
+  addBox(sofa, [3.5, 1.18, 0.32], [0, 1.02, -0.52], fabricMaterial);
+  addBox(sofa, [0.34, 0.94, 1.16], [-1.6, 0.78, 0], fabricMaterial);
+  addBox(sofa, [0.34, 0.94, 1.16], [1.6, 0.78, 0], fabricMaterial);
+  addBox(sofa, [1.48, 0.24, 0.94], [-0.78, 0.75, 0.08], cushionMaterial);
+  addBox(sofa, [1.48, 0.24, 0.94], [0.78, 0.75, 0.08], cushionMaterial);
+  const pillowMaterial = new THREE.MeshStandardMaterial({
+    color: 0xa0784e,
+    roughness: 0.98,
+  });
+  const pillowLeft = addBox(sofa, [0.72, 0.58, 0.22], [-0.92, 1.04, -0.28], pillowMaterial);
+  pillowLeft.rotation.z = -0.08;
+  const pillowRight = addBox(sofa, [0.72, 0.58, 0.22], [0.92, 1.04, -0.28], pillowMaterial);
+  pillowRight.rotation.z = 0.08;
+  interior.add(sofa);
+
+  const coffeeTable = new THREE.Group();
+  coffeeTable.name = "coffee-table";
+  coffeeTable.position.set(-0.2, 0.24, -0.75);
+  addBox(coffeeTable, [2.5, 0.18, 1.35], [0, 0.74, 0], darkWoodMaterial);
+  for (const x of [-1.0, 1.0]) {
+    for (const z of [-0.46, 0.46]) {
+      addBox(coffeeTable, [0.13, 0.7, 0.13], [x, 0.35, z], metalMaterial);
+    }
+  }
+  interior.add(coffeeTable);
+
+  const fireplace = new THREE.Group();
+  fireplace.name = "fireplace";
+  fireplace.position.set(-5.15, 0.24, 0.55);
+  fireplace.rotation.y = Math.PI * 0.5;
+  addBox(fireplace, [2.65, 0.26, 1.05], [0, 0.13, 0], stoneMaterial);
+  addBox(fireplace, [0.48, 2.15, 0.98], [-1.04, 1.18, 0], stoneMaterial);
+  addBox(fireplace, [0.48, 2.15, 0.98], [1.04, 1.18, 0], stoneMaterial);
+  addBox(fireplace, [2.55, 0.35, 0.98], [0, 2.2, 0], stoneMaterial);
+  addBox(fireplace, [1.45, 1.28, 0.1], [0, 0.82, 0.46], metalMaterial);
+  const logMaterial = new THREE.MeshStandardMaterial({
+    color: 0x3b2113,
+    roughness: 1,
+  });
+  for (const x of [-0.34, 0, 0.34]) {
+    const log = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.11, 0.12, 0.84, 8),
+      logMaterial,
+    );
+    log.rotation.z = Math.PI * 0.5;
+    log.position.set(x * 0.6, 0.4, 0.56);
+    fireplace.add(log);
+  }
+  const flameColors = [0xff8a32, 0xffbf58, 0xffd88a];
+  flameColors.forEach((color, index) => {
+    const flame = new THREE.Mesh(
+      new THREE.ConeGeometry(0.2 - index * 0.035, 0.72 + index * 0.2, 8),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.78,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    flame.position.set((index - 1) * 0.18, 0.78 + index * 0.06, 0.58);
+    fireplace.add(flame);
+    fireFlames.push(flame);
+  });
+  interiorFireLight = new THREE.PointLight(0xff8f45, 76, 18, 1.8);
+  interiorFireLight.position.set(0, 0.85, 0.72);
+  fireplace.add(interiorFireLight);
+  interior.add(fireplace);
+
+  const tv = new THREE.Group();
+  tv.name = "television";
+  tv.position.set(5.18, 0.24, -0.75);
+  tv.rotation.y = -Math.PI * 0.5;
+  addBox(tv, [3.35, 0.42, 0.72], [0, 0.55, 0], darkWoodMaterial);
+  addBox(tv, [2.95, 1.62, 0.14], [0, 1.82, 0], metalMaterial);
+  const tvTexture = makeTvTexture();
+  tvScreenMaterial = new THREE.MeshStandardMaterial({
+    map: tvTexture,
+    emissiveMap: tvTexture,
+    emissive: 0x8ca7b1,
+    emissiveIntensity: 1.15,
+    roughness: 0.18,
+    metalness: 0.05,
+  });
+  const screen = new THREE.Mesh(new THREE.PlaneGeometry(2.72, 1.4), tvScreenMaterial);
+  screen.position.set(0, 1.82, 0.081);
+  tv.add(screen);
+  const tvGlow = new THREE.PointLight(0x8dbbc9, 7.5, 10, 1.8);
+  tvGlow.position.set(0, 1.5, 0.75);
+  tv.add(tvGlow);
+  interior.add(tv);
+
+  const pendant = new THREE.Group();
+  pendant.position.set(0, 3.7, 1.0);
+  addBox(pendant, [0.06, 0.7, 0.06], [0, 0.35, 0], metalMaterial);
+  const shade = new THREE.Mesh(
+    new THREE.ConeGeometry(0.42, 0.46, 18, 1, true),
+    new THREE.MeshStandardMaterial({
+      color: 0x3b2f24,
+      roughness: 0.7,
+      metalness: 0.25,
+      side: THREE.DoubleSide,
+    }),
+  );
+  shade.rotation.x = Math.PI;
+  pendant.add(shade);
+  interior.add(pendant);
+  const interiorLight = new THREE.PointLight(0xffc27c, 68, 18, 1.8);
+  interiorLight.position.set(0, 3.3, 1.0);
+  interior.add(interiorLight);
+
+  cabin.updateMatrixWorld(true);
 }
 
 function makeDust() {
@@ -994,6 +1818,13 @@ async function loadSceneAssets() {
   cabin.rotation.y = 2.55229;
   cabin.scale.setScalar(3.338);
   prepareModel(cabin, true);
+  const foundationStoneMaterial = new THREE.MeshStandardMaterial({
+    map: makeFoundationStoneTexture(),
+    color: 0xa69c87,
+    roughness: 0.97,
+    metalness: 0,
+    envMapIntensity: 0.72,
+  });
   cabin.traverse((object) => {
     if (!(object instanceof THREE.Mesh)) return;
     const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -1009,12 +1840,17 @@ async function loadSceneAssets() {
       });
       object.castShadow = false;
     }
+    if (materials.some((material) => material.name === "Building_Base")) {
+      object.material = foundationStoneMaterial;
+    }
   });
   scene.add(cabin);
   cabin.updateMatrixWorld(true);
   cabinBox.setFromObject(cabin);
   cabinCenter = cabinBox.getCenter(new THREE.Vector3());
   const cabinSize = cabinBox.getSize(new THREE.Vector3());
+  clearTreesAroundCabin(cabinCenter, 24);
+  addInterior();
 
   sun.target.position.copy(cabinCenter);
   sun.position.set(cabinCenter.x - 115, cabinCenter.y + 130, cabinCenter.z - 92);
@@ -1044,8 +1880,10 @@ async function loadSceneAssets() {
   controls.update();
 
   addContactShadow();
+  addFoundationEdging();
   addGroundDetails();
   setupAtmosphere();
+  renderer.shadowMap.needsUpdate = true;
   setLoading(98, "调亮窗边的灯火...");
 }
 
@@ -1053,15 +1891,25 @@ function setQuality(nextQuality: QualityMode) {
   quality = nextQuality;
   const deviceRatio = window.devicePixelRatio;
   const ratio = quality === "high"
-    ? Math.min(deviceRatio, 2)
+    ? Math.min(deviceRatio, 1.5)
     : quality === "medium"
-      ? Math.min(deviceRatio, 1.5)
-      : 1;
+      ? Math.min(deviceRatio, 1.2)
+      : Math.min(deviceRatio, 0.9);
   renderer.setPixelRatio(ratio);
   composer.setPixelRatio(ratio);
   renderer.shadowMap.enabled = quality !== "low";
   sun.castShadow = quality !== "low";
-  bloomPass.strength = quality === "high" ? 0.38 : quality === "medium" ? 0.25 : 0;
+  const shadowSize = quality === "high" ? 2048 : 1024;
+  if (sun.shadow.mapSize.x !== shadowSize) {
+    sun.shadow.mapSize.set(shadowSize, shadowSize);
+    if (sun.shadow.map) {
+      sun.shadow.map.dispose();
+      sun.shadow.map = null;
+    }
+  }
+  composer.renderTarget1.samples = quality === "high" ? 2 : 0;
+  composer.renderTarget2.samples = quality === "high" ? 2 : 0;
+  bloomPass.strength = quality === "high" ? 0.34 : quality === "medium" ? 0.22 : 0;
   if (terrain) {
     terrain.traverse((object) => {
       if (object instanceof THREE.Mesh) {
@@ -1070,27 +1918,203 @@ function setQuality(nextQuality: QualityMode) {
     });
   }
   bloomPass.enabled = quality !== "low";
+  renderer.shadowMap.needsUpdate = quality !== "low";
+}
+
+function readSavedQuality(): QualityMode | null {
+  try {
+    const value = window.localStorage.getItem("forest-cabin-quality");
+    return value === "high" || value === "medium" || value === "low" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveQuality(nextQuality: QualityMode) {
+  try {
+    window.localStorage.setItem("forest-cabin-quality", nextQuality);
+  } catch {
+    // Storage can be unavailable in private or restricted browsing contexts.
+  }
 }
 
 function updateAutoOrbit(enabled: boolean) {
-  autoOrbitEnabled = enabled;
-  controls.autoRotate = enabled;
-  autoOrbitButton.classList.toggle("is-active", enabled);
-  autoOrbitButton.setAttribute("aria-pressed", String(enabled));
+  autoOrbitEnabled = enabled && !interiorViewEnabled && !reducedMotion;
+  controls.autoRotate = autoOrbitEnabled;
+  autoOrbitButton.classList.toggle("is-active", autoOrbitEnabled);
+  autoOrbitButton.setAttribute("aria-pressed", String(autoOrbitEnabled));
 }
 
-function resetView() {
-  updateAutoOrbit(false);
+function getExteriorCameraPosition() {
   const framing = getViewFraming();
-  camera.fov = framing.fov;
-  camera.updateProjectionMatrix();
-  initialCameraPosition = initialTarget
+  return initialTarget
     .clone()
     .add(
       new THREE.Vector3(-42, 18, -42).multiplyScalar(framing.distanceScale),
     );
+}
+
+function moveCamera(
+  position: THREE.Vector3,
+  target: THREE.Vector3,
+  duration = 850,
+) {
+  if (reducedMotion) {
+    camera.position.copy(position);
+    controls.target.copy(target);
+    cameraMove = null;
+    controls.enabled = true;
+    controls.update();
+    return;
+  }
+  cameraMove = {
+    fromPosition: camera.position.clone(),
+    toPosition: position.clone(),
+    fromTarget: controls.target.clone(),
+    toTarget: target.clone(),
+    startedAt: clock.elapsedTime,
+    duration,
+  };
+  controls.enabled = false;
+}
+
+function updateCameraMove() {
+  const time = clock.elapsedTime;
+  if (!cameraMove) return;
+  const progress = THREE.MathUtils.clamp(
+    (time - cameraMove.startedAt) / (cameraMove.duration / 1000),
+    0,
+    1,
+  );
+  const eased = 1 - Math.pow(1 - progress, 3);
+  camera.position.lerpVectors(cameraMove.fromPosition, cameraMove.toPosition, eased);
+  controls.target.lerpVectors(cameraMove.fromTarget, cameraMove.toTarget, eased);
+  if (progress >= 1) {
+    camera.position.copy(cameraMove.toPosition);
+    controls.target.copy(cameraMove.toTarget);
+    cameraMove = null;
+    controls.enabled = true;
+    controls.update();
+  }
+}
+
+function queueDolly(direction: -1 | 1) {
+  const minimum = interiorViewEnabled ? 5 : controls.minDistance;
+  const maximum = interiorViewEnabled ? 38 : controls.maxDistance;
+  const current =
+    dollyTargetDistance ?? camera.position.distanceTo(controls.target);
+  const step = interiorViewEnabled ? 2.6 : 8;
+  dollyTargetDistance = THREE.MathUtils.clamp(
+    current + direction * step,
+    minimum,
+    maximum,
+  );
+  if (reducedMotion) {
+    const offset = camera.position.clone().sub(controls.target);
+    camera.position
+      .copy(controls.target)
+      .add(offset.setLength(dollyTargetDistance));
+    dollyTargetDistance = null;
+    controls.update();
+  }
+}
+
+function updateDolly(delta: number) {
+  if (dollyTargetDistance === null) return;
+  const offset = camera.position.clone().sub(controls.target);
+  const current = offset.length();
+  const next = THREE.MathUtils.damp(current, dollyTargetDistance, 9, delta);
+  camera.position.copy(controls.target).add(offset.setLength(next));
+  if (Math.abs(next - dollyTargetDistance) < 0.025) {
+    camera.position
+      .copy(controls.target)
+      .add(offset.setLength(dollyTargetDistance));
+    dollyTargetDistance = null;
+  }
+}
+
+function setInteriorView(enabled: boolean, animate = true) {
+  if (!cabin || interiorViewEnabled === enabled) return;
+  interiorViewEnabled = enabled;
+  updateAutoOrbit(false);
+  dollyTargetDistance = null;
+  interiorViewButton.classList.toggle("is-active", enabled);
+  interiorViewButton.setAttribute("aria-pressed", String(enabled));
+  autoOrbitButton.disabled = enabled || reducedMotion;
+  controls.enablePan = !enabled;
+  if (interiorScene) interiorScene.visible = enabled;
+  if (terrain) terrain.visible = !enabled;
+  cabinExteriorObjects.forEach((object) => {
+    object.visible = !enabled;
+  });
+  lightShafts.forEach((shaft) => {
+    shaft.visible = !enabled;
+  });
+  dustClouds.forEach((cloud) => {
+    cloud.points.visible = !enabled;
+  });
+
+  if (enabled) {
+    camera.fov = 60;
+    controls.minDistance = 5;
+    controls.maxDistance = 38;
+    controls.maxPolarAngle = Math.PI * 0.72;
+    const position = cabin.localToWorld(new THREE.Vector3(1.45, 1.85, 5.9));
+    const target = cabin.localToWorld(new THREE.Vector3(0.2, 1.4, -1.4));
+    if (animate) moveCamera(position, target, 950);
+    else {
+      camera.position.copy(position);
+      controls.target.copy(target);
+    }
+  } else {
+    const framing = getViewFraming();
+    camera.fov = framing.fov;
+    controls.minDistance = 34;
+    controls.maxDistance = 140;
+    controls.maxPolarAngle = Math.PI * 0.49;
+    initialCameraPosition = getExteriorCameraPosition();
+    if (animate) moveCamera(initialCameraPosition, initialTarget, 900);
+    else {
+      camera.position.copy(initialCameraPosition);
+      controls.target.copy(initialTarget);
+    }
+  }
+  renderer.shadowMap.needsUpdate = true;
+  camera.updateProjectionMatrix();
+  if (!animate) controls.update();
+}
+
+function resetView() {
+  interiorViewEnabled = false;
+  interiorViewButton.classList.remove("is-active");
+  interiorViewButton.setAttribute("aria-pressed", "false");
+  autoOrbitButton.disabled = reducedMotion;
+  controls.enablePan = true;
+  if (interiorScene) interiorScene.visible = false;
+  if (terrain) terrain.visible = true;
+  cabinExteriorObjects.forEach((object) => {
+    object.visible = true;
+  });
+  lightShafts.forEach((shaft) => {
+    shaft.visible = true;
+  });
+  dustClouds.forEach((cloud) => {
+    cloud.points.visible = true;
+  });
+  updateAutoOrbit(false);
+  cameraMove = null;
+  dollyTargetDistance = null;
+  const framing = getViewFraming();
+  camera.fov = framing.fov;
+  camera.updateProjectionMatrix();
+  initialCameraPosition = getExteriorCameraPosition();
   camera.position.copy(initialCameraPosition);
   controls.target.copy(initialTarget);
+  controls.minDistance = 34;
+  controls.maxDistance = 140;
+  controls.maxPolarAngle = Math.PI * 0.49;
+  controls.enabled = true;
+  renderer.shadowMap.needsUpdate = true;
   controls.update();
 }
 
@@ -1147,20 +2171,46 @@ function animateLights(time: number) {
   });
 }
 
+function animateInterior(time: number) {
+  if (interiorFireLight) {
+    interiorFireLight.intensity =
+      72 + Math.sin(time * 8.4) * 5.5 + Math.sin(time * 19.7) * 2.1;
+  }
+  fireFlames.forEach((flame, index) => {
+    const wave = Math.sin(time * (7.2 + index * 0.8) + index * 1.9);
+    flame.scale.set(0.82 + wave * 0.12, 0.9 + wave * 0.16, 0.82 + wave * 0.1);
+    const material = flame.material as THREE.MeshBasicMaterial;
+    material.opacity = 0.64 + wave * 0.1;
+  });
+  if (tvScreenMaterial) {
+    tvScreenMaterial.emissiveIntensity = 1.08 + Math.sin(time * 0.7) * 0.08;
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
 
-  controls.update();
+  updateCameraMove();
+  if (!cameraMove) {
+    updateDolly(delta);
+    controls.update();
+  }
   windTime.value = time;
-  animateDust(time);
-  animateSmoke(time);
-  animateLights(time);
-
-  for (const shaft of lightShafts) {
-    const material = shaft.material as THREE.MeshBasicMaterial;
-    material.opacity = 0.012 + Math.sin(time * 0.12 + shaft.id) * 0.002;
+  if (!interiorViewEnabled && !reducedMotion) {
+    animateDust(time);
+    animateSmoke(time);
+  }
+  if (!reducedMotion) {
+    animateLights(time);
+    animateInterior(time);
+    for (const shaft of lightShafts) {
+      const material = shaft.material as THREE.MeshBasicMaterial;
+      material.opacity = 0.012 + Math.sin(time * 0.12 + shaft.id) * 0.002;
+    }
+  } else {
+    windTime.value = 0;
   }
 
   if (quality === "low") {
@@ -1174,7 +2224,7 @@ function onResize() {
   const width = window.innerWidth;
   const height = window.innerHeight;
   camera.aspect = width / height;
-  camera.fov = getViewFraming().fov;
+  camera.fov = interiorViewEnabled ? 60 : getViewFraming().fov;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
   composer.setSize(width, height);
@@ -1186,26 +2236,93 @@ autoOrbitButton.addEventListener("click", () => {
 });
 
 qualitySelect.addEventListener("change", () => {
-  setQuality(qualitySelect.value as QualityMode);
+  const nextQuality = qualitySelect.value as QualityMode;
+  setQuality(nextQuality);
+  saveQuality(nextQuality);
 });
 
 resetViewButton.addEventListener("click", resetView);
+interiorViewButton.addEventListener("click", () => {
+  setInteriorView(!interiorViewEnabled);
+});
 window.addEventListener("resize", onResize);
 
 controls.addEventListener("start", () => {
   if (autoOrbitEnabled) updateAutoOrbit(false);
+  dollyTargetDistance = null;
 });
 
 canvas.addEventListener("dblclick", resetView);
+let pointerGesture: { button: number; x: number; y: number; startedAt: number } | null =
+  null;
+canvas.addEventListener(
+  "mousedown",
+  (event) => {
+    if (event.button !== 0 && event.button !== 2) return;
+    pointerGesture = {
+      button: event.button,
+      x: event.clientX,
+      y: event.clientY,
+      startedAt: performance.now(),
+    };
+  },
+  { capture: true },
+);
+canvas.addEventListener(
+  "mouseup",
+  (event) => {
+    if (!pointerGesture || event.button !== pointerGesture.button) return;
+    const distance = Math.hypot(
+      event.clientX - pointerGesture.x,
+      event.clientY - pointerGesture.y,
+    );
+    const duration = performance.now() - pointerGesture.startedAt;
+    pointerGesture = null;
+    if (distance > 7 || duration > 650) return;
+    queueDolly(event.button === 0 ? -1 : 1);
+  },
+  { capture: true },
+);
+canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+function setCreditsOpen(open: boolean) {
+  creditsPanel.hidden = !open;
+  creditsToggle.setAttribute("aria-expanded", String(open));
+  if (open) creditsClose.focus();
+}
 
 creditsToggle.addEventListener("click", () => {
-  creditsPanel.hidden = !creditsPanel.hidden;
+  setCreditsOpen(creditsPanel.hidden);
 });
 creditsClose.addEventListener("click", () => {
-  creditsPanel.hidden = true;
+  setCreditsOpen(false);
+  creditsToggle.focus();
 });
 
-const defaultQuality: QualityMode = window.innerWidth > 900 ? "high" : "medium";
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!creditsPanel.hidden) {
+    event.preventDefault();
+    setCreditsOpen(false);
+    creditsToggle.focus();
+    return;
+  }
+  if (interiorViewEnabled) {
+    event.preventDefault();
+    setInteriorView(false);
+  }
+});
+
+reducedMotionQuery.addEventListener("change", (event) => {
+  reducedMotion = event.matches;
+  controls.enableDamping = !reducedMotion;
+  autoOrbitButton.disabled = reducedMotion || interiorViewEnabled;
+  updateAutoOrbit(false);
+  if (reducedMotion) windTime.value = 0;
+});
+
+const defaultQuality: QualityMode =
+  readSavedQuality() ?? (window.innerWidth > 900 ? "high" : "medium");
 qualitySelect.value = defaultQuality;
 setQuality(defaultQuality);
 updateAutoOrbit(false);
@@ -1215,7 +2332,7 @@ async function init() {
   await loadEnvironment();
   await loadSceneAssets();
   setLoading(100, "森林已准备好");
-  window.setTimeout(() => loading.classList.add("is-hidden"), 420);
+  window.setTimeout(finishLoading, reducedMotion ? 0 : 420);
   animate();
 }
 
